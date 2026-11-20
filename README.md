@@ -94,6 +94,12 @@ claude plugin test .
 
 To run a working copy instead of the installed one, start Claude Code with `--plugin-dir /path/to/tripwire`, or name the folder in `CLAUDE_CODE_PLUGIN_DIRS`.
 
+## Roadmap
+
+- **Not just macOS.** Secrets are stored in the macOS Keychain and entered through a macOS password box today. Support for Linux and Windows credential stores would make tripwire OS-agnostic.
+- **Multi-source tripwires.** One tripwire watching several sources at once, e.g. "a deploy fails in CircleCI *or* a Datadog monitor alerts". Today each tripwire watches exactly one source.
+- **Configurable polling rate.** The checker runs every 10 minutes on weekdays from 7:00 to 21:59. Let people choose how often, and when.
+
 ## License
 
 [MIT](LICENSE). The icon is Font Awesome's [land-mine-on](https://fontawesome.com/icons/land-mine-on?s=solid), licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
