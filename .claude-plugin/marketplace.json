@@ -1,0 +1,13 @@
+{
+  "name": "tripwire",
+  "description": "Tripwire: Claude Code reminders that fire on activity in Slack, Linear, Jira, GitHub, CircleCI, Datadog or any source you teach it.",
+  "owner": {
+    "name": "Dre Rosales"
+  },
+  "plugins": [
+    {
+      "name": "tripwire",
+      "source": "./"
+    }
+  ]
+}

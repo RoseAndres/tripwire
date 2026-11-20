@@ -1,0 +1,6 @@
+{
+  "id": "datadog",
+  "name": "Datadog",
+  "linkLabel": "Open in Datadog",
+  "auth": { "type": "connector", "tools": ["search_datadog_monitors", "search_datadog_events"], "hint": "Connect the Datadog connector." }
+}

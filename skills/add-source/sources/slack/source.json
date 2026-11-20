@@ -1,0 +1,6 @@
+{
+  "id": "slack",
+  "name": "Slack",
+  "linkLabel": "Open in Slack",
+  "auth": { "type": "connector", "tools": ["slack_search_public_and_private", "slack_read_thread"], "hint": "Connect the Slack connector." }
+}

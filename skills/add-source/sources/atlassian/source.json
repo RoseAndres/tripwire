@@ -1,0 +1,6 @@
+{
+  "id": "atlassian",
+  "name": "Atlassian",
+  "linkLabel": "Open in Atlassian",
+  "auth": { "type": "connector", "tools": ["getAccessibleAtlassianResources", "getJiraIssue"], "hint": "Connect the Atlassian MCP connector (Jira and Confluence)." }
+}

@@ -1,0 +1,15 @@
+{
+  "id": "github",
+  "name": "GitHub",
+  "linkLabel": "Open in GitHub",
+  "auth": {
+    "type": "cli",
+    "check": [
+      "gh",
+      "auth",
+      "status"
+    ],
+    "login": "gh auth login",
+    "install": "download it from https://cli.github.com, or with Homebrew: brew install gh"
+  }
+}

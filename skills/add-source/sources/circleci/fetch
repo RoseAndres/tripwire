@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Prints CircleCI workflows that started or stopped after a time, one JSON object per line.
+
+Usage:
+  fetch <project slug> <since ISO> [<branch>]   workflows in one project
+  fetch --mine <since ISO>                      your own pipelines, across every
+                                                organization you belong to (no slug
+                                                needed: for a first try, and to find
+                                                project slugs)
+
+The API token is read from Keychain (tripwire-circleci-token) inside this
+script and only ever sent as the Circle-Token header. It is never printed,
+logged, or passed to another process's arguments.
+
+Each line: {"url", "title", "at", "thread", "project", "workflow", "status",
+"branch", "pipeline", "commit", "actor"}. On any failure: {"error": "..."} and
+exit 1. Runs on Python 3.9, the system python3 on a fresh Mac.
+"""
+import datetime
+import getpass
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+SERVICE = "tripwire-circleci-token"
+API = "https://circleci.com/api/v2"
+# A workflow that stops inside the window may belong to a pipeline created a
+# while before it, so look back this much further for pipelines.
+PIPELINE_LOOKBACK = datetime.timedelta(hours=6)
+MAX_PAGES = 5
+MAX_ORGS = 10
+
+
+class Failure(Exception):
+    pass
+
+
+def parse_time(text):
+    # Before Python 3.11, fromisoformat takes only 3 or 6 fraction digits, and
+    # CircleCI sometimes sends 2 ("…T21:17:55.56Z"). Pad or cut to 6.
+    text = re.sub(r"\.(\d+)", lambda m: "." + (m.group(1) + "000000")[:6], text.replace("Z", "+00:00"), count=1)
+    return datetime.datetime.fromisoformat(text)
+
+
+def token():
+    account = os.environ.get("USER") or getpass.getuser()
+    found = subprocess.run(["security", "find-generic-password", "-a", account, "-s", SERVICE, "-w"],
+                           capture_output=True, text=True)
+    if found.returncode != 0 or not found.stdout.strip():
+        raise Failure("no CircleCI token in Keychain (%s); run /tripwire:add-source circleci" % SERVICE)
+    return found.stdout.strip()
+
+
+def get(path, key, params=None):
+    url = API + path + ("?" + urllib.parse.urlencode(params) if params else "")
+    request = urllib.request.Request(url, headers={"Circle-Token": key, "Accept": "application/json"})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as e:
+        raise Failure("%d %s" % (e.code, "token rejected" if e.code in (401, 403) else (e.reason or "HTTP error")))
+    except (urllib.error.URLError, TimeoutError) as e:
+        raise Failure("network error: %s" % getattr(e, "reason", e))
+
+
+def app_slug(slug):
+    vcs, _, rest = slug.partition("/")
+    return {"gh": "github", "bb": "bitbucket"}.get(vcs, vcs) + "/" + rest
+
+
+def project_pipelines(slug, branch, since, key):
+    pipelines, page_token = [], None
+    for _ in range(MAX_PAGES):
+        params = {k: v for k, v in (("branch", branch), ("page-token", page_token)) if v}
+        page = get("/project/%s/pipeline" % urllib.parse.quote(slug, safe="/"), key, params)
+        items = page.get("items") or []
+        pipelines += items
+        page_token = page.get("next_page_token")
+        if not page_token or not items or parse_time(items[-1]["created_at"]) < since - PIPELINE_LOOKBACK:
+            break
+    return pipelines
+
+
+def my_pipelines(key):
+    pipelines = []
+    for org in (get("/me/collaborations", key) or [])[:MAX_ORGS]:
+        if org.get("slug"):
+            pipelines += get("/pipeline", key, {"org-slug": org["slug"], "mine": "true"}).get("items") or []
+    return pipelines
+
+
+def print_workflows(pipelines, since, key, fallback_slug=None):
+    for p in pipelines:
+        if parse_time(p["created_at"]) < since - PIPELINE_LOOKBACK:
+            continue
+        slug = p.get("project_slug") or fallback_slug or "?"
+        vcs = p.get("vcs") or {}
+        for w in get("/pipeline/%s/workflow" % p["id"], key).get("items") or []:
+            created = parse_time(w["created_at"])
+            stopped = parse_time(w["stopped_at"]) if w.get("stopped_at") else None
+            if created <= since and (stopped is None or stopped <= since):
+                continue
+            thread = "https://app.circleci.com/pipelines/%s/%s" % (app_slug(slug), p["number"])
+            print(json.dumps({
+                "url": "%s/workflows/%s" % (thread, w["id"]),
+                "title": "%s %s on %s (#%s)" % (w["name"], w["status"], vcs.get("branch") or vcs.get("tag") or "?", p["number"]),
+                "at": w.get("stopped_at") or w["created_at"],
+                "thread": thread,
+                "project": slug,
+                "workflow": w["name"],
+                "status": w["status"],
+                "branch": vcs.get("branch"),
+                "pipeline": p["number"],
+                "commit": ((vcs.get("commit") or {}).get("subject") or "")[:120],
+                "actor": ((p.get("trigger") or {}).get("actor") or {}).get("login"),
+            }, ensure_ascii=False))
+
+
+def main():
+    args = sys.argv[1:]
+    mine = args[:1] == ["--mine"]
+    if mine:
+        args = args[1:]
+    if (mine and len(args) != 1) or (not mine and len(args) not in (2, 3)):
+        raise Failure("usage: fetch <project slug> <since ISO> [<branch>]  |  fetch --mine <since ISO>")
+    since_text = args[0] if mine else args[1]
+    try:
+        since = parse_time(since_text)
+    except ValueError:
+        raise Failure("bad since time: %s" % since_text)
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=datetime.timezone.utc)
+    key = token()
+    if mine:
+        print_workflows(my_pipelines(key), since, key)
+    else:
+        slug, branch = args[0], (args[2] if len(args) == 3 else None)
+        print_workflows(project_pipelines(slug, branch, since, key), since, key, fallback_slug=slug)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Failure as e:
+        print(json.dumps({"error": str(e)}))
+        sys.exit(1)
+    except Exception as e:  # keep the contract: one error line, never a traceback
+        print(json.dumps({"error": "%s: %s" % (type(e).__name__, e)}))
+        sys.exit(1)

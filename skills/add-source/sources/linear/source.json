@@ -1,0 +1,6 @@
+{
+  "id": "linear",
+  "name": "Linear",
+  "linkLabel": "Open in Linear",
+  "auth": { "type": "connector", "tools": ["list_issues", "get_issue", "list_comments"], "hint": "Connect the Linear connector." }
+}

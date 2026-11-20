@@ -1,0 +1,11 @@
+{
+  "id": "circleci",
+  "name": "CircleCI",
+  "linkLabel": "Open in CircleCI",
+  "auth": {
+    "type": "keychain",
+    "items": [
+      { "service": "tripwire-circleci-token", "label": "CircleCI personal API token", "helpUrl": "https://app.circleci.com/settings/user/tokens" }
+    ]
+  }
+}
