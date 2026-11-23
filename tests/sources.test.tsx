@@ -306,15 +306,24 @@ test('the pane flags a tripwire whose source is gone and shows the last check er
   await ui.unmount()
 })
 
+const ROUTINE_FOLDER = '/home/test/.claude/scheduled-tasks/tripwire-poller'
+const EMPTY_TASKS = 'No scheduled tasks found. Use create_scheduled_task to create one.'
+
 // The uninstall script's answers, and the routine tools it reaches for.
-function uninstallHost(on: On, choice: string) {
-  const plan = { keychain: [{ service: 'tripwire-circleci-token', account: 'tester' }], kept: ['pushover-user-key'], folder: DIR, errors: [] }
+// `tasks` is what list_scheduled_tasks returns; null leaves the routine tools
+// out of the session.
+function uninstallHost(on: On, choice: string, tasks: unknown = [{ taskId: 'tripwire-poller' }]) {
+  const plan = { keychain: [{ service: 'tripwire-circleci-token', account: 'tester' }], kept: ['pushover-user-key'], folder: DIR, routine: ROUTINE_FOLDER, errors: [] }
   const host = fakeHost(on, { [INVENTORY]: JSON.stringify({ version: 1, tripwires: [] }), [SOURCES]: JSON.stringify(added('circleci')) }, argv =>
     argv[2]?.endsWith('/uninstall.py')
-      ? { stdout: JSON.stringify(argv[3] === 'apply' ? { ...plan, removed: { keychain: ['tripwire-circleci-token'], folder: true } } : plan) }
+      ? {
+          stdout: JSON.stringify(
+            argv[3] === 'apply' ? { ...plan, removed: { keychain: ['tripwire-circleci-token'], folder: true, routine: argv[4] === '--routine' } } : plan,
+          ),
+        }
       : undefined,
   )
-  host.tools.push('mcp__scheduled-tasks__list_scheduled_tasks', 'mcp__scheduled-tasks__delete_scheduled_task')
+  if (tasks !== null) host.tools.push('mcp__scheduled-tasks__list_scheduled_tasks', 'mcp__scheduled-tasks__delete_scheduled_task')
   const asked: string[] = []
   const deleted: unknown[] = []
   on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
@@ -322,7 +331,7 @@ function uninstallHost(on: On, choice: string) {
     asked.push(question)
     return { result: { answers: { [question]: choice } } } as never
   })
-  on('tool.call', { tool: 'mcp__scheduled-tasks__list_scheduled_tasks' }, () => ({ result: [{ taskId: 'tripwire-poller' }] }) as never)
+  on('tool.call', { tool: 'mcp__scheduled-tasks__list_scheduled_tasks' }, () => ({ result: tasks }) as never)
   on('tool.call', { tool: 'mcp__scheduled-tasks__delete_scheduled_task' }, ($, e) => {
     deleted.push((e as unknown as { taskId: string }).taskId)
     return { result: 'deleted' } as never
@@ -335,7 +344,7 @@ test('uninstall asks first and changes nothing when cancelled', async ($, on) =>
 
   const ran = await $.tool.call({ tool: 'mcp__tripwire__uninstall' } as never)
 
-  expect(host.asked[0]).toMatch(/tripwire-circleci-token.*can't be undone.*Kept.*pushover-user-key.*Uninstall tripwire\?$/)
+  expect(host.asked[0]).toMatch(/routine and moves its folder to the Trash.*tripwire-circleci-token.*can't be undone.*Kept.*pushover-user-key.*Uninstall tripwire\?$/)
   expect(String(ran.result)).toMatch(/cancelled/)
   expect(host.deleted).toEqual([])
   expect(host.ran.some(r => r.argv[3] === 'apply')).toBe(false)
@@ -347,11 +356,31 @@ test('uninstall removes the routine, Keychain items and folder once confirmed', 
   const ran = await $.tool.call({ tool: 'mcp__tripwire__uninstall' } as never)
 
   expect(host.deleted).toEqual(['tripwire-poller'])
-  expect(host.ran.filter(r => r.argv[2]?.endsWith('/uninstall.py')).map(r => r.argv[3])).toEqual(['plan', 'apply'])
-  expect(String(ran.result)).toMatch(/Deleted the tripwire-poller routine.*tripwire-circleci-token.*Trash.*Kept: pushover-user-key.*still installed/)
+  expect(host.ran.filter(r => r.argv[2]?.endsWith('/uninstall.py')).map(r => r.argv.slice(3))).toEqual([['plan'], ['apply', '--routine']])
+  expect(String(ran.result)).toMatch(
+    /Deleted the tripwire-poller routine\. Moved the routine's folder.*Trash.*tripwire-circleci-token.*Trash.*Kept: pushover-user-key.*still installed/,
+  )
 })
 
-const EMPTY_TASKS = 'No scheduled tasks found. Use create_scheduled_task to create one.'
+test('uninstall clears a leftover routine folder even when no routine is scheduled', async ($, on) => {
+  const host = uninstallHost(on, 'Uninstall', EMPTY_TASKS)
+
+  const ran = await $.tool.call({ tool: 'mcp__tripwire__uninstall' } as never)
+
+  expect(host.deleted).toEqual([])
+  expect(host.ran.find(r => r.argv[3] === 'apply')?.argv[4]).toBe('--routine')
+  expect(String(ran.result)).toMatch(/Moved the routine's folder/)
+})
+
+test("uninstall leaves the routine folder when it can't reach the routine", async ($, on) => {
+  const host = uninstallHost(on, 'Uninstall', null)
+
+  const ran = await $.tool.call({ tool: 'mcp__tripwire__uninstall' } as never)
+
+  expect(host.ran.find(r => r.argv[3] === 'apply')?.argv[4]).toBeUndefined()
+  expect(String(ran.result)).toMatch(/No scheduled-tasks tools.*Its folder.*was left in place/)
+})
+
 const ROUTINE_TOOLS = ['list_scheduled_tasks', 'create_scheduled_task', 'update_scheduled_task'].map(n => `mcp__scheduled-tasks__${n}`)
 
 test('install creates the checker routine when there are no routines yet', async ($, on) => {
@@ -371,12 +400,61 @@ test('install creates the checker routine when there are no routines yet', async
   expect(String(ran.result)).toMatch(/Created the tripwire-poller routine/)
 })
 
+// Install with no routines scheduled; `create` answers create_scheduled_task.
+function installHost(on: On, files: Record<string, string>, create: () => object, trashExit = 0) {
+  const host = fakeHost(on, files, argv => (argv[0] === '/usr/bin/trash' ? { exitCode: trashExit } : undefined))
+  host.tools.push(...ROUTINE_TOOLS)
+  const created: unknown[] = []
+  on('tool.call', { tool: 'mcp__scheduled-tasks__list_scheduled_tasks' }, () => ({ result: EMPTY_TASKS }) as never)
+  on('tool.call', { tool: 'mcp__scheduled-tasks__create_scheduled_task' }, ($, e) => {
+    created.push((e as unknown as { taskId: string }).taskId)
+    return create() as never
+  })
+  const wrote = () => [...host.disk.keys()].filter(k => k.startsWith(`${DIR}/`))
+  return { ...host, created, wrote }
+}
+
+const LEFTOVER = { [`${ROUTINE_FOLDER}/SKILL.md`]: '# old tripwire poller prompt' }
+
 test('install fails, rather than passing, when the routine cannot be set up', async ($, on) => {
-  fakeHost(on, {})
+  const host = fakeHost(on, {})
 
   const ran = await $.tool.call({ tool: 'mcp__tripwire__install' } as never)
 
-  expect(ran.deny).toMatch(/No scheduled-tasks tools.*wasn't set up/)
+  expect(ran.deny).toMatch(/No scheduled-tasks tools.*wasn't set up.*Nothing was installed/)
+  expect([...host.disk.keys()]).toEqual([])
+})
+
+test('install moves a leftover routine folder to the Trash, then creates the routine', async ($, on) => {
+  const host = installHost(on, LEFTOVER, () => ({ result: 'created' }))
+
+  const ran = await $.tool.call({ tool: 'mcp__tripwire__install' } as never)
+
+  expect(host.ran.find(r => r.argv[0] === '/usr/bin/trash')?.argv[1]).toBe(ROUTINE_FOLDER)
+  expect(host.created).toEqual(['tripwire-poller'])
+  expect(String(ran.result)).toMatch(/Created the tripwire-poller routine.*Moved a leftover .*tripwire-poller folder/)
+})
+
+test("install stops, writing nothing, when a leftover routine folder can't be moved", async ($, on) => {
+  const host = installHost(on, LEFTOVER, () => ({ result: 'created' }), 1)
+
+  const ran = await $.tool.call({ tool: 'mcp__tripwire__install' } as never)
+
+  expect(host.created).toEqual([])
+  expect(ran.deny).toMatch(/leftover .*tripwire-poller folder.*Ask the user to move that folder to the Trash/)
+  expect(host.wrote()).toEqual([])
+})
+
+test('install writes nothing and offers no other routine id when creating the routine is refused', async ($, on) => {
+  const refusal =
+    'the ID "tripwire-poller" is already in use on the user\'s computer (another task\'s folder has that name). Call create_scheduled_task again with taskId "tripwire-poller-2".'
+  const host = installHost(on, {}, () => ({ result: refusal, isError: true }))
+
+  const ran = await $.tool.call({ tool: 'mcp__tripwire__install' } as never)
+
+  expect(ran.deny).toMatch(/already in use.*Don't create the routine yourself or under another id.*Nothing was installed/)
+  expect(ran.deny).not.toMatch(/tripwire-poller-2|Call create_scheduled_task/)
+  expect(host.wrote()).toEqual([])
 })
 
 test('check_source: a cli that cannot be found asks for an install, not a login', async ($, on) => {

@@ -12,6 +12,8 @@ Call `mcp__tripwire__install`. It copies tripwire's scripts into `~/.claude/trip
 
 If it fails, stop here and tell the user what it said. Without the routine nothing ever checks a tripwire, so don't go on to add sources as if setup worked. The usual cause is running outside the Claude desktop app, which is what provides routines.
 
+Never create the routine yourself with the scheduled-tasks tools, and never under another id such as `tripwire-poller-2`, even if an error suggests it. The checker pauses and resumes itself by the exact id `tripwire-poller`, so a renamed copy would never stop or restart. Fix what the error names, then call `mcp__tripwire__install` again.
+
 ## 2. Ask which sources to watch
 
 Call `mcp__tripwire__check_source` with no id to see the built-in sources and which are already added. Then ask with AskUserQuestion, using two multi-select questions. Leave out options that are already added, and drop a question once all its options are added:

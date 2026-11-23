@@ -679,7 +679,7 @@ export const register: Register = on => {
       const report = await install($)
       // Without the routine nothing ever checks a tripwire, so setup must not
       // carry on as if it worked.
-      if (!report.routineOk) return { deny: `${report.scripts} ${report.guides} But: ${report.routine}` }
+      if (!report.routineOk) return { deny: `${report.routine} ${report.scripts}` }
       return { result: [report.scripts, report.routine, report.guides].filter(Boolean).join(' ') }
     } catch (err) {
       return { deny: err instanceof SourceError ? err.message : `Install failed: ${describe(err)}` }
@@ -697,7 +697,7 @@ export const register: Register = on => {
     const count = (await read($, inventory)).tripwires.length
     const items = plan.keychain.map(i => i.service)
     const question = [
-      `This deletes the tripwire-poller routine`,
+      `This deletes the tripwire-poller routine${plan.routine ? ' and moves its folder to the Trash' : ''}`,
       items.length > 0 ? ` and ${items.length} Keychain item${items.length === 1 ? '' : 's'} (${items.join(', ')}), which can't be undone,` : '',
       plan.folder ? ` and moves ${plan.folder} (${count} tripwire${count === 1 ? '' : 's'}, source guides and settings) to the Trash.` : '.',
       plan.kept.length > 0 ? ` Kept, since tripwire didn't create them: ${plan.kept.join(', ')}.` : '',
@@ -714,16 +714,18 @@ export const register: Register = on => {
     const routine = await removeRoutine($)
     let done: UninstallReport
     try {
-      done = await runUninstall($, 'apply')
+      done = await runUninstall($, 'apply', routine.gone)
     } catch (err) {
-      return { deny: `${routine} Then removing the files failed: ${describe(err)}` }
+      return { deny: `${routine.text} Then removing the files failed: ${describe(err)}` }
     }
     await update($, inventory, () => EMPTY)
     await update($, sourcesAtom, () => EMPTY_SOURCES)
     const removed = done.removed?.keychain ?? []
     return {
       result: [
-        routine,
+        routine.text,
+        done.removed?.routine ? `Moved the routine's folder, ${done.routine}, to the Trash.` : '',
+        !routine.gone && done.routine ? `Its folder, ${done.routine}, was left in place; move it to the Trash once the routine is deleted, or a later install can't create it.` : '',
         removed.length > 0 ? `Deleted Keychain items: ${removed.join(', ')}.` : 'No tripwire Keychain items to delete.',
         done.removed?.folder ? `Moved ${done.folder} to the Trash.` : plan.folder ? '' : 'There was no ~/.claude/tripwires folder.',
         done.kept.length > 0 ? `Kept: ${done.kept.join(', ')}.` : '',

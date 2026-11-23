@@ -19,6 +19,10 @@ export const LIST_TASKS = 'mcp__scheduled-tasks__list_scheduled_tasks'
 export const UPDATE_TASK = 'mcp__scheduled-tasks__update_scheduled_task'
 export const CREATE_TASK = 'mcp__scheduled-tasks__create_scheduled_task'
 export const DELETE_TASK = 'mcp__scheduled-tasks__delete_scheduled_task'
+// Where the desktop app keeps each routine's prompt, as <taskId>/SKILL.md.
+// delete_scheduled_task leaves that folder on disk, and create_scheduled_task
+// refuses a taskId whose folder exists, so install and uninstall both look here.
+const ROUTINES_DIR = '.claude/scheduled-tasks'
 // Weekdays, every 10 minutes from 7:00 to 21:59 local time.
 const POLLER_CRON = '*/10 7-21 * * 1-5'
 const POLLER_DESCRIPTION = 'Check armed tripwires against new activity in their sources and push a notification when one trips'
@@ -380,23 +384,36 @@ export function parseTaskList(listed: { text?: string; result?: unknown }): List
   }
 }
 
+export async function routineFolder($: EngineInterface) {
+  return `${await $.env.get('HOME')}/${ROUTINES_DIR}/${POLLER_TASK}`
+}
+
 export type InstallReport = { scripts: string; routine: string; routineOk: boolean; guides: string }
 
-// Copies the checker's scripts to ~/.claude/tripwires/bin and creates the
-// checker routine, or points the existing one at the current prompt.
+// Creates the checker routine, or points the existing one at the current
+// prompt, then copies the checker's scripts to ~/.claude/tripwires/bin. The
+// routine goes first, as it's the step that can be refused: when it fails,
+// no files have been written.
 export async function install($: EngineInterface): Promise<InstallReport> {
   const dir = await tripwiresDir($)
   const bin = `${dir}/bin`
-  await mkdirs($, `${dir}/sources`)
-  await mkdirs($, bin)
-  for (const name of SCRIPTS) {
-    await $.fs.write(`${bin}/${name}`, await $.fs.read(`${$.plugin.root}/scripts/${name}`))
-    await chmodX($, `${bin}/${name}`)
-  }
   const home = (await $.env.get('HOME')) ?? ''
   const prompt = (await $.fs.read(`${$.plugin.root}/poller/PROMPT.md`)).replaceAll('{{TRIPWIRES}}', dir).replaceAll('{{HOME}}', home)
   const routine = await installRoutine($, prompt)
-  return { scripts: `Copied ${SCRIPTS.join(', ')} to ${bin}.`, routine: routine.text, routineOk: routine.ok, guides: await refreshGuides($) }
+  if (!routine.ok) return { scripts: 'Nothing was installed.', routine: routine.text, routineOk: false, guides: '' }
+  try {
+    await mkdirs($, `${dir}/sources`)
+    await mkdirs($, bin)
+    for (const name of SCRIPTS) {
+      await $.fs.write(`${bin}/${name}`, await $.fs.read(`${$.plugin.root}/scripts/${name}`))
+      await chmodX($, `${bin}/${name}`)
+    }
+  } catch (err) {
+    throw new SourceError(
+      `${routine.text} But copying the checker's scripts to ${bin} failed (${err instanceof Error ? err.message : String(err)}), so the routine can't run yet. Run install again.`,
+    )
+  }
+  return { scripts: `Copied ${SCRIPTS.join(', ')} to ${bin}.`, routine: routine.text, routineOk: true, guides: await refreshGuides($) }
 }
 
 // Brings the guides of added built-in sources up to date, and says which
@@ -435,16 +452,42 @@ async function installRoutine($: EngineInterface, prompt: string): Promise<{ ok:
   const tasks = parseTaskList(listed)
   if (tasks === undefined) return { ok: false, text: `Couldn't read the routine list, so the ${POLLER_TASK} routine wasn't set up.` }
   const exists = tasks.some(t => t.taskId === POLLER_TASK)
+  // A folder with no routine behind it is what an earlier install leaves once
+  // its routine is deleted. The app won't create the routine while it's there,
+  // so move it to the Trash (it only holds an old copy of the prompt).
+  let cleared = ''
+  if (!exists) {
+    const folder = await routineFolder($)
+    if (await $.fs.exists(folder)) {
+      const moved = await $.process.run(['/usr/bin/trash', folder]).catch(() => undefined)
+      if (moved?.exitCode !== 0) {
+        return {
+          ok: false,
+          text: `A leftover ${folder} folder from an earlier install blocks creating the ${POLLER_TASK} routine, and moving it to the Trash failed. Ask the user to move that folder to the Trash, then run install again.`,
+        }
+      }
+      cleared = ` Moved a leftover ${folder} folder from an earlier install to the Trash first.`
+    }
+  }
   const call = exists
     ? { tool: UPDATE_TASK, taskId: POLLER_TASK, prompt, description: POLLER_DESCRIPTION }
     : { tool: CREATE_TASK, taskId: POLLER_TASK, title: 'Tripwire poller', prompt, description: POLLER_DESCRIPTION, cronExpression: POLLER_CRON }
   const done = await $.tool.call(call as never)
-  if (done.deny !== undefined || done.isError) return { ok: false, text: `Setting up the ${POLLER_TASK} routine failed: ${done.deny ?? done.text ?? 'error'}` }
+  if (done.deny !== undefined || done.isError) {
+    // The app's refusal can suggest another taskId. Don't pass that on: the
+    // checker pauses and resumes itself by this exact id.
+    const said = (done.deny ?? done.text ?? (typeof done.result === 'string' ? done.result : '')).split(/\.\s+Call /)[0]!.trim()
+    return {
+      ok: false,
+      text: `Setting up the ${POLLER_TASK} routine failed${said ? ` (${said})` : ''}. Don't create the routine yourself or under another id: the checker only works as ${POLLER_TASK}. Tell the user what failed.`,
+    }
+  }
   return {
     ok: true,
-    text: exists
-      ? `Updated the ${POLLER_TASK} routine's prompt (its schedule is unchanged).`
-      : `Created the ${POLLER_TASK} routine: weekdays, every 10 minutes, 7:00–21:59.`,
+    text:
+      (exists
+        ? `Updated the ${POLLER_TASK} routine's prompt (its schedule is unchanged).`
+        : `Created the ${POLLER_TASK} routine: weekdays, every 10 minutes, 7:00–21:59.`) + cleared,
   }
 }
 
@@ -453,14 +496,18 @@ export type UninstallReport = {
   keychain: { service: string; account: string }[]
   kept: string[]
   folder: string | null
-  removed?: { keychain: string[]; folder: boolean }
+  routine: string | null
+  removed?: { keychain: string[]; folder: boolean; routine: boolean }
   errors: string[]
 }
 
 // Runs the bundled uninstall script. `plan` changes nothing; `apply` deletes
-// the tripwire-* Keychain items and moves ~/.claude/tripwires to the Trash.
-export async function runUninstall($: EngineInterface, mode: 'plan' | 'apply'): Promise<UninstallReport> {
-  const ran = await $.process.run(['/usr/bin/python3', '-I', `${$.plugin.root}/scripts/uninstall.py`, mode], { timeoutMs: 60_000 })
+// the tripwire-* Keychain items and moves ~/.claude/tripwires to the Trash,
+// and with `withRoutine` the routine's folder too (only once the routine
+// itself is gone, so a live routine never loses its prompt).
+export async function runUninstall($: EngineInterface, mode: 'plan' | 'apply', withRoutine = false): Promise<UninstallReport> {
+  const argv = ['/usr/bin/python3', '-I', `${$.plugin.root}/scripts/uninstall.py`, mode, ...(withRoutine ? ['--routine'] : [])]
+  const ran = await $.process.run(argv, { timeoutMs: 60_000 })
   try {
     const report = JSON.parse(ran.stdout) as UninstallReport
     if (!Array.isArray(report.keychain) || !Array.isArray(report.errors)) throw new Error('bad shape')
@@ -470,18 +517,20 @@ export async function runUninstall($: EngineInterface, mode: 'plan' | 'apply'): 
   }
 }
 
-// Deletes the checker routine, when this session can see it.
-export async function removeRoutine($: EngineInterface): Promise<string> {
+// Deletes the checker routine, when this session can see it. `gone` says the
+// routine is no longer scheduled (deleted, or there wasn't one), so its
+// folder can go too.
+export async function removeRoutine($: EngineInterface): Promise<{ gone: boolean; text: string }> {
   const names = new Set((await $.tool.list()).map(t => t.name))
   if (!names.has(LIST_TASKS) || !names.has(DELETE_TASK)) {
-    return `No scheduled-tasks tools in this session, so the ${POLLER_TASK} routine (if any) is still there. Delete it from the Claude desktop app.`
+    return { gone: false, text: `No scheduled-tasks tools in this session, so the ${POLLER_TASK} routine (if any) is still there. Delete it from the Claude desktop app.` }
   }
   const listed = await $.tool.call({ tool: LIST_TASKS } as never)
-  if (listed.deny !== undefined) return `Listing routines was refused, so the ${POLLER_TASK} routine (if any) is still there: ${listed.deny}`
+  if (listed.deny !== undefined) return { gone: false, text: `Listing routines was refused, so the ${POLLER_TASK} routine (if any) is still there: ${listed.deny}` }
   const tasks = parseTaskList(listed)
-  if (tasks === undefined) return `Couldn't read the routine list, so the ${POLLER_TASK} routine (if any) is still there.`
-  if (!tasks.some(t => t.taskId === POLLER_TASK)) return `There was no ${POLLER_TASK} routine to remove.`
+  if (tasks === undefined) return { gone: false, text: `Couldn't read the routine list, so the ${POLLER_TASK} routine (if any) is still there.` }
+  if (!tasks.some(t => t.taskId === POLLER_TASK)) return { gone: true, text: '' }
   const done = await $.tool.call({ tool: DELETE_TASK, taskId: POLLER_TASK } as never)
-  if (done.deny !== undefined || done.isError) return `Deleting the ${POLLER_TASK} routine failed: ${done.deny ?? done.text ?? 'error'}`
-  return `Deleted the ${POLLER_TASK} routine.`
+  if (done.deny !== undefined || done.isError) return { gone: false, text: `Deleting the ${POLLER_TASK} routine failed: ${done.deny ?? done.text ?? 'error'}` }
+  return { gone: true, text: `Deleted the ${POLLER_TASK} routine.` }
 }

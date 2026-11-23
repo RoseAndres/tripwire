@@ -74,13 +74,13 @@ Setup can send trips to your phone and laptop through [Pushover](https://pushove
 
 ## Uninstall
 
-`/tripwire:uninstall` asks first, then deletes the `tripwire-poller` routine and the `tripwire-…` Keychain items, and moves `~/.claude/tripwires` to the Trash. To remove the mod itself afterwards:
+`/tripwire:uninstall` asks first, then deletes the `tripwire-poller` routine and the `tripwire-…` Keychain items, and moves `~/.claude/tripwires` and the routine's folder to the Trash. To remove the mod itself afterwards:
 
 ```
 /plugin uninstall tripwire
 ```
 
-If the mod is already gone, the same cleanup runs from a shell: `python3 ~/.claude/tripwires/bin/uninstall.py plan` shows what would go, and `apply` does it.
+If the mod is already gone, the same cleanup runs from a shell: `python3 ~/.claude/tripwires/bin/uninstall.py plan` shows what would go, and `apply` does it. Delete the `tripwire-poller` routine in the desktop app first, then use `apply --routine` so its leftover folder goes too.
 
 ## Development
 
