@@ -413,6 +413,8 @@ export async function install($: EngineInterface): Promise<InstallReport> {
       `${routine.text} But copying the checker's scripts to ${bin} failed (${err instanceof Error ? err.message : String(err)}), so the routine can't run yet. Run install again.`,
     )
   }
+  const version = await currentVersion($)
+  if (version) await $.fs.write(`${bin}/VERSION`, `${version}\n`)
   return { scripts: `Copied ${SCRIPTS.join(', ')} to ${bin}.`, routine: routine.text, routineOk: true, guides: await refreshGuides($) }
 }
 
@@ -535,24 +537,20 @@ export async function removeRoutine($: EngineInterface): Promise<{ gone: boolean
   return { gone: true, text: `Deleted the ${POLLER_TASK} routine.` }
 }
 
-// Auto-update. Claude Code reads a marketplace's autoUpdate from its entry
-// under extraKnownMarketplaces in ~/.claude/settings.json first, then from
-// ~/.claude/plugins/known_marketplaces.json (where the /plugin toggle writes
-// it). Third-party marketplaces default to off.
-type MarketplaceEntry = { source?: unknown; installLocation?: unknown; autoUpdate?: unknown }
-export type AutoUpdateStatus =
-  | { state: 'not_marketplace' }
-  | { state: 'on' | 'off'; marketplace: string; source: unknown; settingsPath: string }
+// Updates. The desktop app runs Claude Code with DISABLE_AUTOUPDATER=1, which
+// turns marketplace auto-update off, and a mod can't write the settings that
+// would turn it on. So tripwire checks for a new version itself and updates
+// through the Claude Code program running this session.
+export type Origin = { state: 'folder' } | { state: 'marketplace'; marketplace: string; source: unknown }
 
-async function readJson($: EngineInterface, path: string, what: string): Promise<Record<string, unknown> | undefined> {
+async function readJson($: EngineInterface, path: string): Promise<Record<string, unknown> | undefined> {
   if (!(await $.fs.exists(path))) return undefined
   try {
     const parsed = JSON.parse(await $.fs.read(path)) as unknown
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : undefined
   } catch {
-    // fall through
+    return undefined
   }
-  throw new SourceError(`${what} (${path}) isn't valid JSON, so tripwire left it alone.`)
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -562,9 +560,8 @@ function asRecord(value: unknown): Record<string, unknown> {
 // Which marketplace this copy of the mod was installed from, if any: an
 // installed plugin runs from ~/.claude/plugins/cache/<marketplace>/…, while one
 // loaded with --plugin-dir or CLAUDE_CODE_PLUGIN_DIRS runs from its own folder.
-export async function autoUpdateStatus($: EngineInterface): Promise<AutoUpdateStatus> {
-  const home = await $.env.get('HOME')
-  const known = asRecord(await readJson($, `${home}/.claude/plugins/known_marketplaces.json`, 'The marketplace list'))
+export async function installedFrom($: EngineInterface): Promise<Origin> {
+  const known = asRecord(await readJson($, `${await $.env.get('HOME')}/.claude/plugins/known_marketplaces.json`))
   const root = $.plugin.root
   const fromCache = /\/\.claude\/plugins\/cache\/([^/]+)\//.exec(`${root}/`)?.[1]
   const marketplace =
@@ -573,29 +570,88 @@ export async function autoUpdateStatus($: EngineInterface): Promise<AutoUpdateSt
       const at = asRecord(known[name]).installLocation
       return typeof at === 'string' && `${root}/`.startsWith(`${at.replace(/\/$/, '')}/`)
     })
-  if (marketplace === undefined) return { state: 'not_marketplace' }
-  const entry = asRecord(known[marketplace]) as MarketplaceEntry
-  const settingsPath = `${home}/.claude/settings.json`
-  const settings = (await readJson($, settingsPath, 'Your Claude Code settings')) ?? {}
-  const declared = asRecord(asRecord(settings.extraKnownMarketplaces)[marketplace]) as MarketplaceEntry
-  const on = (typeof declared.autoUpdate === 'boolean' ? declared.autoUpdate : entry.autoUpdate) === true
-  return { state: on ? 'on' : 'off', marketplace, source: declared.source ?? entry.source, settingsPath }
+  return marketplace === undefined ? { state: 'folder' } : { state: 'marketplace', marketplace, source: asRecord(known[marketplace]).source }
 }
 
-// Sets autoUpdate on the marketplace's extraKnownMarketplaces entry, keeping
-// everything else in settings.json as it was.
-export async function enableAutoUpdate($: EngineInterface, status: { marketplace: string; source: unknown; settingsPath: string }) {
-  const settings = (await readJson($, status.settingsPath, 'Your Claude Code settings')) ?? {}
-  const marketplaces = asRecord(settings.extraKnownMarketplaces)
-  const entry = asRecord(marketplaces[status.marketplace])
-  const next = {
-    ...settings,
-    extraKnownMarketplaces: { ...marketplaces, [status.marketplace]: { ...entry, source: entry.source ?? status.source, autoUpdate: true } },
-  }
-  await $.fs.write(status.settingsPath, `${JSON.stringify(next, null, 2)}\n`)
+export async function currentVersion($: EngineInterface): Promise<string | undefined> {
+  const version = (await readJson($, `${$.plugin.root}/.claude-plugin/plugin.json`))?.version
+  return typeof version === 'string' ? version : undefined
 }
 
-export function describeMarketplaceSource(source: unknown) {
+// The marketplace's plugin.json on GitHub, for a marketplace added from a
+// GitHub repo (tripwire's plugin sits at the repo's root).
+function manifestUrl(source: unknown): string | undefined {
   const s = asRecord(source)
-  return typeof s.repo === 'string' ? s.repo : typeof s.url === 'string' ? s.url : typeof s.path === 'string' ? s.path : undefined
+  const repo =
+    typeof s.repo === 'string'
+      ? s.repo
+      : typeof s.url === 'string'
+        ? /^(?:https:\/\/|git@)github\.com[/:]([^/]+\/[^/]+?)(?:\.git)?\/?$/.exec(s.url)?.[1]
+        : undefined
+  return repo && /^[\w.-]+\/[\w.-]+$/.test(repo) ? `https://raw.githubusercontent.com/${repo}/HEAD/.claude-plugin/plugin.json` : undefined
+}
+
+export async function latestVersion($: EngineInterface, origin: Origin): Promise<string | undefined> {
+  if (origin.state !== 'marketplace') return undefined
+  const url = manifestUrl(origin.source)
+  if (!url) return undefined
+  const got = await $.http.fetch(url)
+  if (!got.ok) return undefined
+  try {
+    const version = (JSON.parse(got.text) as { version?: unknown }).version
+    return typeof version === 'string' ? version : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// Whether version a is newer than b, comparing dotted numbers.
+export function isNewer(a: string, b: string) {
+  const parts = (v: string) => v.split(/[.+-]/).slice(0, 3).map(n => Number.parseInt(n, 10) || 0)
+  const [x, y] = [parts(a), parts(b)]
+  for (let i = 0; i < 3; i++) if ((x[i] ?? 0) !== (y[i] ?? 0)) return (x[i] ?? 0) > (y[i] ?? 0)
+  return false
+}
+
+// install records the version whose scripts and routine prompt it copied, so
+// a session can tell when the mod has moved on and the checker hasn't.
+export async function versionFile($: EngineInterface) {
+  return `${await tripwiresDir($)}/bin/VERSION`
+}
+
+export async function checkerVersion($: EngineInterface): Promise<string | undefined> {
+  const path = await versionFile($)
+  return (await $.fs.exists(path)) ? (await $.fs.read(path)).trim() || undefined : undefined
+}
+
+// The Claude Code program running this session; the desktop app doesn't put
+// `claude` on PATH.
+async function claudeProgram($: EngineInterface) {
+  const own = await $.env.get('CLAUDE_CODE_EXECPATH')
+  if (own && (await $.fs.exists(own))) return own
+  return findCommand($, 'claude')
+}
+
+export type UpdateReport = { ok: boolean; text: string; from?: string; to?: string }
+
+// Refreshes the marketplace from its source, then updates the plugin from it.
+export async function runUpdate($: EngineInterface, origin: Extract<Origin, { state: 'marketplace' }>): Promise<UpdateReport> {
+  const claude = await claudeProgram($)
+  if (!claude) return { ok: false, text: "Couldn't find the Claude Code program to update with." }
+  const from = await currentVersion($)
+  const steps = [
+    ['plugin', 'marketplace', 'update', origin.marketplace],
+    ['plugin', 'update', `${$.plugin.name}@${origin.marketplace}`],
+  ]
+  for (const args of steps) {
+    const ran = await $.process.run([claude, ...args], { timeoutMs: 120_000 }).catch(err => ({ exitCode: -1, stdout: '', stderr: String(err) }))
+    if (ran.exitCode !== 0) {
+      const said = `${ran.stderr || ran.stdout}`.trim().split('\n').slice(-3).join(' ').slice(0, 300)
+      return { ok: false, text: `\`claude ${args.join(' ')}\` failed${said ? `: ${said}` : ''}.` }
+    }
+  }
+  const installed = asRecord(await readJson($, `${await $.env.get('HOME')}/.claude/plugins/installed_plugins.json`))
+  const entries = asRecord(installed.plugins ?? installed)[`${$.plugin.name}@${origin.marketplace}`]
+  const to = Array.isArray(entries) ? asRecord(entries[0]).version : undefined
+  return { ok: true, text: '', from, to: typeof to === 'string' ? to : undefined }
 }

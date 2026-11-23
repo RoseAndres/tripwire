@@ -33,11 +33,11 @@ claude plugin install tripwire --marketplace RoseAndres/tripwire
 
 In the desktop app, where `/plugin` doesn't run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `RoseAndres/tripwire`, then **Add plugin**.
 
-`/tripwire:setup` offers to turn on auto-updates, so new versions install when a Claude Code session starts. Without it, update from `/plugin` → **Marketplaces** → `tripwire` → **Update marketplace**.
+When a new version is out, tripwire says so with a toast when a session starts. Run `/tripwire:update` to get it.
 
 ## Get started
 
-Run `/tripwire:setup` in the desktop app. It installs the background checker, offers to turn on auto-updates, asks which sources to watch (suggesting Slack, Atlassian, Linear, GitHub, CircleCI and Datadog), signs each one in, tries it once, and optionally sets up Pushover notifications.
+Run `/tripwire:setup` in the desktop app. It installs the background checker, asks which sources to watch (suggesting Slack, Atlassian, Linear, GitHub, CircleCI and Datadog), signs each one in, tries it once, and optionally sets up Pushover notifications.
 
 Then arm one:
 
@@ -53,6 +53,7 @@ Then arm one:
 | `/tripwire:inventory` | Opens the Tripwires pane, listing armed and tripped tripwires. |
 | `/tripwire:setup` | Installs the background checker, then picks sources to watch and sets up push notifications. |
 | `/tripwire:add-source <name>` | Teaches tripwire to watch a new tool, signing it in and storing tokens in Keychain. |
+| `/tripwire:update` | Updates tripwire to its newest version, then refreshes the background checker's scripts. |
 | `/tripwire:uninstall` | Removes tripwire's routine, Keychain tokens and files after you confirm. |
 
 You can also just ask: "make tripwire watch PagerDuty", "uninstall tripwire".
@@ -102,7 +103,6 @@ To run a working copy instead of the installed one, start Claude Code with `--pl
 - **Not just macOS.** Secrets are stored in the macOS Keychain and entered through a macOS password box today. Support for Linux and Windows credential stores would make tripwire OS-agnostic.
 - **Multi-source tripwires.** One tripwire watching several sources at once, e.g. "a deploy fails in CircleCI *or* a Datadog monitor alerts". Today each tripwire watches exactly one source.
 - **Configurable polling rate.** The checker runs every 10 minutes on weekdays from 7:00 to 21:59. Let people choose how often, and when.
-- **An update skill.** After the mod updates, `/tripwire:setup` has to be run again to copy the new scripts and refresh the routine's prompt. A `/tripwire:update` would do just that, without walking through source setup again.
 
 ## License
 

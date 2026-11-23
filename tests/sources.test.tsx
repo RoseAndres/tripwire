@@ -18,7 +18,12 @@ type Ran = { argv: readonly string[]; stdin?: string }
 // `builtin`, keyed by the path after that folder.
 const BUILTIN_MARK = '/skills/add-source/sources'
 
-function fakeHost(on: On, files: Record<string, string>, answer?: (argv: readonly string[]) => Partial<{ exitCode: number; stdout: string }> | undefined) {
+function fakeHost(
+  on: On,
+  files: Record<string, string>,
+  answer?: (argv: readonly string[]) => Partial<{ exitCode: number; stdout: string; stderr: string }> | undefined,
+  env: Record<string, string> = {},
+) {
   const disk = new Map(Object.entries(files))
   const builtin = new Map<string, string>()
   const ran: Ran[] = []
@@ -28,7 +33,7 @@ function fakeHost(on: On, files: Record<string, string>, answer?: (argv: readonl
     return at < 0 ? { map: disk, key: path } : { map: builtin, key: path.slice(at + BUILTIN_MARK.length).replace(/^\//, '') }
   }
   const under = (key: string) => (key === '' ? '' : `${key}/`)
-  mock.env(on, { HOME: '/home/test', USER: 'tester' })
+  mock.env(on, { HOME: '/home/test', USER: 'tester', ...env })
   const clock = mock.clock(on, { now: NOW })
   on('fs.exists', ($, e) => {
     const { map, key } = where(e.path)
@@ -59,7 +64,7 @@ function fakeHost(on: On, files: Record<string, string>, answer?: (argv: readonl
   on('process.run', ($, e) => {
     ran.push({ argv: e.argv, stdin: e.init?.stdin })
     const got = answer?.(e.argv)
-    return { value: { exitCode: got?.exitCode ?? 0, stdout: got?.stdout ?? '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    return { value: { exitCode: got?.exitCode ?? 0, stdout: got?.stdout ?? '', stderr: got?.stderr ?? '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   on('tool.list', () => ({ value: tools.map(name => ({ name, description: '', mcp: true })) }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
@@ -511,62 +516,62 @@ test('check_source leaves an edited copy alone until asked to replace it', async
   expect(host.ran.find(r => r.argv[0] === 'mv')?.argv[2]).toMatch(/sources\/github\.replaced-/)
 })
 
-// A marketplace install: the mod's folder sits inside the marketplace's. The
-// test can't see the mod's folder, so it reads it from the mod's own answer
-// before any marketplace is known, then writes the files the case needs.
+// A marketplace install: the mod's folder sits inside the marketplace's, and
+// GitHub's copy of plugin.json says `latest`. The test can't see the mod's
+// folder, so it reads it from the mod's own answer before any marketplace is
+// known, then writes the files the case needs.
 const KNOWN = '/home/test/.claude/plugins/known_marketplaces.json'
-const SETTINGS = '/home/test/.claude/settings.json'
-const AUTO_UPDATE = { tool: 'mcp__tripwire__auto_update' } as never
+const INSTALLED = '/home/test/.claude/plugins/installed_plugins.json'
+const CLAUDE = '/apps/claude'
+const UPDATE = { tool: 'mcp__tripwire__update' } as never
 
-async function autoUpdateHost(
+async function updateHost(
   $: { tool: { call: (c: never) => Promise<{ result?: unknown }> } },
   on: On,
-  choice: string,
-  marketplace: object,
-  settings?: unknown,
+  { current, latest, checker, fail }: { current: string; latest: string; checker?: string; fail?: string },
 ) {
-  const host = fakeHost(on, {})
-  const asked: string[] = []
-  on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
-    const { question } = (e as unknown as { questions: { question: string }[] }).questions[0]!
-    asked.push(question)
-    return { result: { answers: { [question]: choice } } } as never
+  const host = fakeHost(on, { [`${CLAUDE}`]: '' }, argv => (argv[0] === CLAUDE && fail && argv.includes(fail) ? { exitCode: 1, stderr: 'network down' } : undefined), {
+    CLAUDE_CODE_EXECPATH: CLAUDE,
   })
-  const first = String((await $.tool.call(AUTO_UPDATE)).result)
+  const fetched: string[] = []
+  on('http.fetch', ($, e) => {
+    fetched.push(e.url)
+    return { value: { status: 200, ok: true, headers: {}, text: JSON.stringify({ version: latest }) } } as never
+  })
+  const first = String((await $.tool.call(UPDATE)).result)
   const root = /loaded from a folder \(([^)]+)\)/.exec(first)![1]!
-  host.disk.set(KNOWN, JSON.stringify({ tripwire: { source: { source: 'github', repo: 'RoseAndres/tripwire' }, installLocation: root, ...marketplace } }))
-  if (settings !== undefined) host.disk.set(SETTINGS, JSON.stringify(settings))
-  return { ...host, asked, settings: () => host.read<Record<string, unknown>>(SETTINGS) }
+  host.disk.set(`${root}/.claude-plugin/plugin.json`, JSON.stringify({ name: 'tripwire', version: current }))
+  host.disk.set(KNOWN, JSON.stringify({ tripwire: { source: { source: 'git', url: 'https://github.com/RoseAndres/tripwire.git' }, installLocation: root } }))
+  host.disk.set(INSTALLED, JSON.stringify({ version: 2, plugins: { 'tripwire@tripwire': [{ version: latest }] } }))
+  if (checker !== undefined) host.disk.set(`${DIR}/bin/VERSION`, `${checker}\n`)
+  const claudeRuns = () => host.ran.filter(r => r.argv[0] === CLAUDE).map(r => r.argv.slice(1).join(' '))
+  return { ...host, fetched, claudeRuns }
 }
 
-test('auto_update asks, then sets autoUpdate on the marketplace and keeps other settings', async ($, on) => {
-  const host = await autoUpdateHost($ as never, on, 'Turn on auto-updates', {}, { model: 'opus' })
+test('update refreshes the marketplace and updates the plugin when GitHub has a newer version', async ($, on) => {
+  const host = await updateHost($ as never, on, { current: '0.3.1', latest: '0.4.0', checker: '0.3.1' })
 
-  const ran = await $.tool.call(AUTO_UPDATE)
+  const ran = await $.tool.call(UPDATE)
 
-  expect(host.asked[0]).toMatch(/tripwire marketplace \(RoseAndres\/tripwire\)/)
-  expect(String(ran.result)).toMatch(/Turned on auto-updates/)
-  expect(host.settings()).toEqual({
-    model: 'opus',
-    extraKnownMarketplaces: { tripwire: { source: { source: 'github', repo: 'RoseAndres/tripwire' }, autoUpdate: true } },
-  })
+  expect(host.fetched.at(-1)).toBe('https://raw.githubusercontent.com/RoseAndres/tripwire/HEAD/.claude-plugin/plugin.json')
+  expect(host.claudeRuns()).toEqual(['plugin marketplace update tripwire', 'plugin update tripwire@tripwire'])
+  expect(String(ran.result)).toMatch(/Updated tripwire from 0\.3\.1 to 0\.4\.0.*quits and reopens Claude.*\/tripwire:update once more/)
 })
 
-test('auto_update changes nothing when the user declines', async ($, on) => {
-  const host = await autoUpdateHost($ as never, on, 'Not now', {}, { model: 'opus' })
+test('update on the newest version says to refresh a checker left on older scripts', async ($, on) => {
+  const host = await updateHost($ as never, on, { current: '0.4.0', latest: '0.4.0', checker: '0.3.1' })
 
-  const ran = await $.tool.call(AUTO_UPDATE)
+  const ran = await $.tool.call(UPDATE)
 
-  expect(String(ran.result)).toMatch(/chose not to/)
-  expect(host.settings()).toEqual({ model: 'opus' })
+  expect(host.claudeRuns()).toEqual([])
+  expect(String(ran.result)).toMatch(/0\.4\.0 is the newest version.*call mcp__tripwire__install/)
 })
 
-test("auto_update doesn't ask when it's already on", async ($, on) => {
-  const host = await autoUpdateHost($ as never, on, 'Turn on auto-updates', { autoUpdate: true })
+test("update reports the failing step and doesn't go on", async ($, on) => {
+  const host = await updateHost($ as never, on, { current: '0.3.1', latest: '0.4.0', fail: 'marketplace' })
 
-  const ran = await $.tool.call(AUTO_UPDATE)
+  const ran = await $.tool.call(UPDATE)
 
-  expect(String(ran.result)).toMatch(/already on/)
-  expect(host.asked).toEqual([])
-  expect(host.disk.has(SETTINGS)).toBe(false)
+  expect(host.claudeRuns()).toEqual(['plugin marketplace update tripwire'])
+  expect(ran.deny).toMatch(/claude plugin marketplace update tripwire` failed: network down/)
 })

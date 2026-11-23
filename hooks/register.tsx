@@ -8,9 +8,12 @@ import {
   POLLER_TASK,
   SourceError,
   TRIPWIRES_DIR,
-  autoUpdateStatus,
-  describeMarketplaceSource,
-  enableAutoUpdate,
+  checkerVersion,
+  currentVersion,
+  installedFrom,
+  isNewer,
+  latestVersion,
+  runUpdate,
   UPDATE_TASK,
   builtinIds,
   describeReadiness,
@@ -41,7 +44,7 @@ const ADD_SOURCE_TOOL = 'mcp__tripwire__add_source'
 const REMOVE_SOURCE_TOOL = 'mcp__tripwire__remove_source'
 const INSTALL_TOOL = 'mcp__tripwire__install'
 const UNINSTALL_TOOL = 'mcp__tripwire__uninstall'
-const AUTO_UPDATE_TOOL = 'mcp__tripwire__auto_update'
+const UPDATE_TOOL = 'mcp__tripwire__update'
 const POLL_MS = 30_000
 const POLLER_CHECK_MS = 10 * 60_000
 const STRIPE = '#8080801f'
@@ -115,6 +118,26 @@ function toolArgs(e: unknown) {
 }
 
 const describe = (err: unknown) => (err instanceof Error ? err.message : String(err))
+
+// Whether install last ran for an older version than this one. A checker set
+// up before 0.4.0 has scripts but no VERSION file.
+async function checkerStale($: EngineInterface, version: string | undefined) {
+  if (version === undefined || !(await $.fs.exists(`${await $.env.get('HOME')}/${TRIPWIRES_DIR}/bin`))) return false
+  return (await checkerVersion($)) !== version
+}
+
+async function versionNotice($: EngineInterface) {
+  const current = await currentVersion($)
+  if (current === undefined) return
+  if (await checkerStale($, current)) {
+    $.ui.toast(`Tripwire is now ${current}. Run /tripwire:update to finish updating its checker.`, { timeoutMs: 10_000 })
+    return
+  }
+  const latest = await latestVersion($, await installedFrom($))
+  if (latest !== undefined && isNewer(latest, current)) {
+    $.ui.toast(`Tripwire ${latest} is out (you have ${current}). Run /tripwire:update to get it.`, { timeoutMs: 10_000 })
+  }
+}
 
 function editTripwire(id: string, fn: (t: Tripwire) => Tripwire) {
   return (inv: Inventory): Inventory => ({
@@ -422,9 +445,9 @@ export const register: Register = on => {
       inputSchema: { type: 'object', properties: {} },
     })
     await $.tool.register({
-      name: 'auto_update',
+      name: 'update',
       description:
-        "Offers to turn on auto-updates for the marketplace tripwire was installed from. It asks the user in a dialog of its own, so don't ask first, then sets autoUpdate on that marketplace in ~/.claude/settings.json. Says so and changes nothing when it's already on or tripwire wasn't installed from a marketplace. Used by the tripwire:setup skill.",
+        "Updates tripwire to the newest version from the marketplace it was installed from, using the Claude Code program running this session. When it's already current but the checker's scripts are older, it says to call install. Used by the tripwire:update skill; call it only when the user asked to update tripwire.",
       inputSchema: { type: 'object', properties: {} },
     })
 
@@ -488,6 +511,9 @@ export const register: Register = on => {
     await pruneDisarmed($).catch(() => undefined)
     await poll({ isStartup: true }).catch(() => undefined)
     $.clock.every(POLL_MS, () => void poll().catch(() => undefined))
+    // Says when the mod moved on without the checker, or a newer version is
+    // out. Off the startup path: it may reach the network.
+    void versionNotice($).catch(() => undefined)
 
     return next(e)
   })
@@ -696,33 +722,33 @@ export const register: Register = on => {
     }
   })
 
-  // Asks the user itself, so a settings change never rests on the model's word.
-  on('tool.call', { tool: AUTO_UPDATE_TOOL }, async $ => {
+  on('tool.call', { tool: UPDATE_TOOL }, async $ => {
     try {
-      const status = await autoUpdateStatus($)
-      if (status.state === 'not_marketplace') {
-        return { result: `tripwire is loaded from a folder (${$.plugin.root}), not installed from a marketplace, so there's nothing to auto-update. Skip this step.` }
+      const origin = await installedFrom($)
+      const current = await currentVersion($)
+      const finish = async (version: string | undefined) =>
+        (await checkerStale($, version))
+          ? ` The checker still has an older version's scripts: call mcp__tripwire__install now to refresh them.`
+          : ' The checker is up to date too.'
+      if (origin.state === 'folder') {
+        return {
+          result: `tripwire${current ? ` ${current}` : ''} is loaded from a folder (${$.plugin.root}), not installed from a marketplace, so update that folder instead (git pull, say).${await finish(current)}`,
+        }
       }
-      if (status.state === 'on') return { result: `Auto-update is already on for the ${status.marketplace} marketplace. Nothing changed.` }
-      if (status.source === undefined) {
-        return { deny: `Couldn't find where the ${status.marketplace} marketplace comes from. Turn auto-update on from /plugin → Marketplaces → ${status.marketplace} instead.` }
+      const latest = await latestVersion($, origin).catch(() => undefined)
+      if (latest !== undefined && current !== undefined && !isNewer(latest, current)) {
+        return { result: `tripwire ${current} is the newest version.${await finish(current)}` }
       }
-      const from = describeMarketplaceSource(status.source)
-      const question = [
-        `Keep tripwire up to date automatically? Claude Code will check the ${status.marketplace} marketplace${from ? ` (${from})` : ''} for new versions when a session starts and install them.`,
-        ` This sets autoUpdate on it in ${status.settingsPath}. You can turn it off any time from /plugin → Marketplaces.`,
-      ].join('')
-      let answer: string
-      try {
-        answer = await $.ui.ask(question, { options: ['Turn on auto-updates', 'Not now'], header: 'Updates' })
-      } catch {
-        return { result: 'Auto-updates not turned on (the question was dismissed). Nothing changed.' }
+      const report = await runUpdate($, origin)
+      if (!report.ok) return { deny: `Updating tripwire failed: ${report.text}` }
+      if (report.to !== undefined && report.from !== undefined && !isNewer(report.to, report.from)) {
+        return { result: `tripwire ${report.from} is the newest version.${await finish(report.from)}` }
       }
-      if (answer !== 'Turn on auto-updates') return { result: 'The user chose not to turn on auto-updates. Nothing changed.' }
-      await enableAutoUpdate($, status)
-      return { result: `Turned on auto-updates for the ${status.marketplace} marketplace in ${status.settingsPath}. New versions install when a Claude Code session starts.` }
+      return {
+        result: `Updated tripwire${report.from ? ` from ${report.from}` : ''}${report.to ? ` to ${report.to}` : ''}. The new version loads once the user quits and reopens Claude. Then they run /tripwire:update once more to refresh the checker's scripts.`,
+      }
     } catch (err) {
-      return { deny: `${describe(err)} Turn auto-update on from /plugin → Marketplaces instead.` }
+      return { deny: `Updating tripwire failed: ${describe(err)}` }
     }
   })
 
