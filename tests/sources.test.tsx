@@ -510,3 +510,63 @@ test('check_source leaves an edited copy alone until asked to replace it', async
   expect(host.disk.get(`${DIR}/sources/github/SOURCE.md`)).toMatch(/Poll better\./)
   expect(host.ran.find(r => r.argv[0] === 'mv')?.argv[2]).toMatch(/sources\/github\.replaced-/)
 })
+
+// A marketplace install: the mod's folder sits inside the marketplace's. The
+// test can't see the mod's folder, so it reads it from the mod's own answer
+// before any marketplace is known, then writes the files the case needs.
+const KNOWN = '/home/test/.claude/plugins/known_marketplaces.json'
+const SETTINGS = '/home/test/.claude/settings.json'
+const AUTO_UPDATE = { tool: 'mcp__tripwire__auto_update' } as never
+
+async function autoUpdateHost(
+  $: { tool: { call: (c: never) => Promise<{ result?: unknown }> } },
+  on: On,
+  choice: string,
+  marketplace: object,
+  settings?: unknown,
+) {
+  const host = fakeHost(on, {})
+  const asked: string[] = []
+  on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
+    const { question } = (e as unknown as { questions: { question: string }[] }).questions[0]!
+    asked.push(question)
+    return { result: { answers: { [question]: choice } } } as never
+  })
+  const first = String((await $.tool.call(AUTO_UPDATE)).result)
+  const root = /loaded from a folder \(([^)]+)\)/.exec(first)![1]!
+  host.disk.set(KNOWN, JSON.stringify({ tripwire: { source: { source: 'github', repo: 'RoseAndres/tripwire' }, installLocation: root, ...marketplace } }))
+  if (settings !== undefined) host.disk.set(SETTINGS, JSON.stringify(settings))
+  return { ...host, asked, settings: () => host.read<Record<string, unknown>>(SETTINGS) }
+}
+
+test('auto_update asks, then sets autoUpdate on the marketplace and keeps other settings', async ($, on) => {
+  const host = await autoUpdateHost($ as never, on, 'Turn on auto-updates', {}, { model: 'opus' })
+
+  const ran = await $.tool.call(AUTO_UPDATE)
+
+  expect(host.asked[0]).toMatch(/tripwire marketplace \(RoseAndres\/tripwire\)/)
+  expect(String(ran.result)).toMatch(/Turned on auto-updates/)
+  expect(host.settings()).toEqual({
+    model: 'opus',
+    extraKnownMarketplaces: { tripwire: { source: { source: 'github', repo: 'RoseAndres/tripwire' }, autoUpdate: true } },
+  })
+})
+
+test('auto_update changes nothing when the user declines', async ($, on) => {
+  const host = await autoUpdateHost($ as never, on, 'Not now', {}, { model: 'opus' })
+
+  const ran = await $.tool.call(AUTO_UPDATE)
+
+  expect(String(ran.result)).toMatch(/chose not to/)
+  expect(host.settings()).toEqual({ model: 'opus' })
+})
+
+test("auto_update doesn't ask when it's already on", async ($, on) => {
+  const host = await autoUpdateHost($ as never, on, 'Turn on auto-updates', { autoUpdate: true })
+
+  const ran = await $.tool.call(AUTO_UPDATE)
+
+  expect(String(ran.result)).toMatch(/already on/)
+  expect(host.asked).toEqual([])
+  expect(host.disk.has(SETTINGS)).toBe(false)
+})

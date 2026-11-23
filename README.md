@@ -33,9 +33,11 @@ claude plugin install tripwire --marketplace RoseAndres/tripwire
 
 In the desktop app, where `/plugin` doesn't run: click **+** next to the prompt box, then **Plugins**, **Add marketplace** with `RoseAndres/tripwire`, then **Add plugin**.
 
+`/tripwire:setup` offers to turn on auto-updates, so new versions install when a Claude Code session starts. Without it, update from `/plugin` → **Marketplaces** → `tripwire` → **Update marketplace**.
+
 ## Get started
 
-Run `/tripwire:setup` in the desktop app. It installs the background checker, asks which sources to watch (suggesting Slack, Atlassian, Linear, GitHub, CircleCI and Datadog), signs each one in, tries it once, and optionally sets up Pushover notifications.
+Run `/tripwire:setup` in the desktop app. It installs the background checker, offers to turn on auto-updates, asks which sources to watch (suggesting Slack, Atlassian, Linear, GitHub, CircleCI and Datadog), signs each one in, tries it once, and optionally sets up Pushover notifications.
 
 Then arm one:
 

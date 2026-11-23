@@ -14,6 +14,8 @@ If it fails, stop here and tell the user what it said. Without the routine nothi
 
 Never create the routine yourself with the scheduled-tasks tools, and never under another id such as `tripwire-poller-2`, even if an error suggests it. The checker pauses and resumes itself by the exact id `tripwire-poller`, so a renamed copy would never stop or restart. Fix what the error names, then call `mcp__tripwire__install` again.
 
+Once it succeeds, call `mcp__tripwire__auto_update`. It asks the user itself whether to keep tripwire up to date automatically, so don't ask first. If the user turns it down, or tripwire wasn't installed from a marketplace, carry on.
+
 ## 2. Ask which sources to watch
 
 Call `mcp__tripwire__check_source` with no id to see the built-in sources and which are already added. Then ask with AskUserQuestion, using two multi-select questions. Leave out options that are already added, and drop a question once all its options are added:

@@ -8,6 +8,9 @@ import {
   POLLER_TASK,
   SourceError,
   TRIPWIRES_DIR,
+  autoUpdateStatus,
+  describeMarketplaceSource,
+  enableAutoUpdate,
   UPDATE_TASK,
   builtinIds,
   describeReadiness,
@@ -38,6 +41,7 @@ const ADD_SOURCE_TOOL = 'mcp__tripwire__add_source'
 const REMOVE_SOURCE_TOOL = 'mcp__tripwire__remove_source'
 const INSTALL_TOOL = 'mcp__tripwire__install'
 const UNINSTALL_TOOL = 'mcp__tripwire__uninstall'
+const AUTO_UPDATE_TOOL = 'mcp__tripwire__auto_update'
 const POLL_MS = 30_000
 const POLLER_CHECK_MS = 10 * 60_000
 const STRIPE = '#8080801f'
@@ -417,6 +421,12 @@ export const register: Register = on => {
         "Uninstalls tripwire. It first asks the user to confirm in a dialog of its own, then deletes the tripwire-poller routine and the tripwire-* Keychain items and moves ~/.claude/tripwires (tripwires, source guides, settings) to the Trash. The mod itself stays installed. Used by the tripwire:uninstall skill; call it only when the user asked to uninstall.",
       inputSchema: { type: 'object', properties: {} },
     })
+    await $.tool.register({
+      name: 'auto_update',
+      description:
+        "Offers to turn on auto-updates for the marketplace tripwire was installed from. It asks the user in a dialog of its own, so don't ask first, then sets autoUpdate on that marketplace in ~/.claude/settings.json. Says so and changes nothing when it's already on or tripwire wasn't installed from a marketplace. Used by the tripwire:setup skill.",
+      inputSchema: { type: 'object', properties: {} },
+    })
 
     // An unreadable file keeps the last good state on screen and says why in
     // the status line until the file parses again. An unchanged file is
@@ -683,6 +693,36 @@ export const register: Register = on => {
       return { result: [report.scripts, report.routine, report.guides].filter(Boolean).join(' ') }
     } catch (err) {
       return { deny: err instanceof SourceError ? err.message : `Install failed: ${describe(err)}` }
+    }
+  })
+
+  // Asks the user itself, so a settings change never rests on the model's word.
+  on('tool.call', { tool: AUTO_UPDATE_TOOL }, async $ => {
+    try {
+      const status = await autoUpdateStatus($)
+      if (status.state === 'not_marketplace') {
+        return { result: `tripwire is loaded from a folder (${$.plugin.root}), not installed from a marketplace, so there's nothing to auto-update. Skip this step.` }
+      }
+      if (status.state === 'on') return { result: `Auto-update is already on for the ${status.marketplace} marketplace. Nothing changed.` }
+      if (status.source === undefined) {
+        return { deny: `Couldn't find where the ${status.marketplace} marketplace comes from. Turn auto-update on from /plugin → Marketplaces → ${status.marketplace} instead.` }
+      }
+      const from = describeMarketplaceSource(status.source)
+      const question = [
+        `Keep tripwire up to date automatically? Claude Code will check the ${status.marketplace} marketplace${from ? ` (${from})` : ''} for new versions when a session starts and install them.`,
+        ` This sets autoUpdate on it in ${status.settingsPath}. You can turn it off any time from /plugin → Marketplaces.`,
+      ].join('')
+      let answer: string
+      try {
+        answer = await $.ui.ask(question, { options: ['Turn on auto-updates', 'Not now'], header: 'Updates' })
+      } catch {
+        return { result: 'Auto-updates not turned on (the question was dismissed). Nothing changed.' }
+      }
+      if (answer !== 'Turn on auto-updates') return { result: 'The user chose not to turn on auto-updates. Nothing changed.' }
+      await enableAutoUpdate($, status)
+      return { result: `Turned on auto-updates for the ${status.marketplace} marketplace in ${status.settingsPath}. New versions install when a Claude Code session starts.` }
+    } catch (err) {
+      return { deny: `${describe(err)} Turn auto-update on from /plugin → Marketplaces instead.` }
     }
   })
 

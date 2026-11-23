@@ -534,3 +534,68 @@ export async function removeRoutine($: EngineInterface): Promise<{ gone: boolean
   if (done.deny !== undefined || done.isError) return { gone: false, text: `Deleting the ${POLLER_TASK} routine failed: ${done.deny ?? done.text ?? 'error'}` }
   return { gone: true, text: `Deleted the ${POLLER_TASK} routine.` }
 }
+
+// Auto-update. Claude Code reads a marketplace's autoUpdate from its entry
+// under extraKnownMarketplaces in ~/.claude/settings.json first, then from
+// ~/.claude/plugins/known_marketplaces.json (where the /plugin toggle writes
+// it). Third-party marketplaces default to off.
+type MarketplaceEntry = { source?: unknown; installLocation?: unknown; autoUpdate?: unknown }
+export type AutoUpdateStatus =
+  | { state: 'not_marketplace' }
+  | { state: 'on' | 'off'; marketplace: string; source: unknown; settingsPath: string }
+
+async function readJson($: EngineInterface, path: string, what: string): Promise<Record<string, unknown> | undefined> {
+  if (!(await $.fs.exists(path))) return undefined
+  try {
+    const parsed = JSON.parse(await $.fs.read(path)) as unknown
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as Record<string, unknown>
+  } catch {
+    // fall through
+  }
+  throw new SourceError(`${what} (${path}) isn't valid JSON, so tripwire left it alone.`)
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
+}
+
+// Which marketplace this copy of the mod was installed from, if any: an
+// installed plugin runs from ~/.claude/plugins/cache/<marketplace>/…, while one
+// loaded with --plugin-dir or CLAUDE_CODE_PLUGIN_DIRS runs from its own folder.
+export async function autoUpdateStatus($: EngineInterface): Promise<AutoUpdateStatus> {
+  const home = await $.env.get('HOME')
+  const known = asRecord(await readJson($, `${home}/.claude/plugins/known_marketplaces.json`, 'The marketplace list'))
+  const root = $.plugin.root
+  const fromCache = /\/\.claude\/plugins\/cache\/([^/]+)\//.exec(`${root}/`)?.[1]
+  const marketplace =
+    (fromCache !== undefined && fromCache in known ? fromCache : undefined) ??
+    Object.keys(known).find(name => {
+      const at = asRecord(known[name]).installLocation
+      return typeof at === 'string' && `${root}/`.startsWith(`${at.replace(/\/$/, '')}/`)
+    })
+  if (marketplace === undefined) return { state: 'not_marketplace' }
+  const entry = asRecord(known[marketplace]) as MarketplaceEntry
+  const settingsPath = `${home}/.claude/settings.json`
+  const settings = (await readJson($, settingsPath, 'Your Claude Code settings')) ?? {}
+  const declared = asRecord(asRecord(settings.extraKnownMarketplaces)[marketplace]) as MarketplaceEntry
+  const on = (typeof declared.autoUpdate === 'boolean' ? declared.autoUpdate : entry.autoUpdate) === true
+  return { state: on ? 'on' : 'off', marketplace, source: declared.source ?? entry.source, settingsPath }
+}
+
+// Sets autoUpdate on the marketplace's extraKnownMarketplaces entry, keeping
+// everything else in settings.json as it was.
+export async function enableAutoUpdate($: EngineInterface, status: { marketplace: string; source: unknown; settingsPath: string }) {
+  const settings = (await readJson($, status.settingsPath, 'Your Claude Code settings')) ?? {}
+  const marketplaces = asRecord(settings.extraKnownMarketplaces)
+  const entry = asRecord(marketplaces[status.marketplace])
+  const next = {
+    ...settings,
+    extraKnownMarketplaces: { ...marketplaces, [status.marketplace]: { ...entry, source: entry.source ?? status.source, autoUpdate: true } },
+  }
+  await $.fs.write(status.settingsPath, `${JSON.stringify(next, null, 2)}\n`)
+}
+
+export function describeMarketplaceSource(source: unknown) {
+  const s = asRecord(source)
+  return typeof s.repo === 'string' ? s.repo : typeof s.url === 'string' ? s.url : typeof s.path === 'string' ? s.path : undefined
+}
