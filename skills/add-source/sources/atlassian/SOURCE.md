@@ -27,4 +27,13 @@ Given a tripwire and its window start:
 
 ## Smoke test
 
-A first try when the source is added, with no scope to pick. Call `getAccessibleAtlassianResources` for the `cloudId`, then `searchJiraIssuesUsingJql` with `updated >= -1d ORDER BY updated DESC`, max 5 results, fields `summary,updated`. It needs no project. If those tools aren't listed, use `discover` and `executeRead` as in `## Creating a tripwire`.
+A first try when the source is added, with no scope to pick. It needs no project or space.
+
+1. Call `getAccessibleAtlassianResources` for the `cloudId`.
+2. Run both searches, even if the first fails:
+   - Jira: `searchJiraIssuesUsingJql` with `updated >= -1d ORDER BY updated DESC`, max 5 results, fields `summary,updated`.
+   - Confluence: `searchConfluenceUsingCql` (or `searchConfluence`) with `lastmodified >= now("-1d") ORDER BY lastmodified DESC`, limit 5.
+   - If those tools aren't listed, use `discover` and `executeRead` as in `## Creating a tripwire`.
+3. Report each product on its own line: how many results, or the error. Zero results is a pass.
+4. If one product works and the other errors, the sign-in is fine and the source can still be added. Tell the user which product's tripwires won't work until it's fixed, and pass on its error as it came. Don't retry the failing search with other tools or the other Atlassian connector; that rarely changes the answer.
+5. If both fail, don't add the source. Report both errors.

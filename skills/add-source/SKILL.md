@@ -51,6 +51,8 @@ Report in one or two lines how many events came back and one example (its title 
 
 If it fails, fix the guide (or the `fetch` script) and repeat this step. A 401/403 means the token is wrong or lacks a scope: say which scope the API needs and go back to step 2 with `store_secret` (it replaces the stored value).
 
+Follow the smoke test's own instructions when it says what to do if part of it fails. An error the service itself returns (a 5xx, "temporarily unavailable", an outage) isn't a fault in the guide: report it as it came and don't rewrite the guide to get around it.
+
 ## 4. Save it
 
 Call `mcp__tripwire__add_source` with the id. Report the result in one line, and say the user can now arm one with `/tripwire:arm remind me to … when …`.
