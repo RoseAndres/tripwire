@@ -54,7 +54,7 @@ Then arm one:
 | `/tripwire:setup` | Installs the background checker, then picks sources to watch and sets up push notifications. |
 | `/tripwire:add-source <name>` | Teaches tripwire to watch a new tool, signing it in and storing tokens in Keychain. |
 | `/tripwire:update` | Updates tripwire to its newest version, then refreshes the background checker's scripts. |
-| `/tripwire:uninstall` | Removes tripwire's routine, Keychain tokens and files after you confirm. |
+| `/tripwire:uninstall` | Removes tripwire completely after you confirm: routine, Keychain tokens, files and the plugin. |
 
 You can also just ask: "make tripwire watch PagerDuty", "uninstall tripwire".
 
@@ -77,11 +77,7 @@ Setup can send trips to your phone and laptop through [Pushover](https://pushove
 
 ## Uninstall
 
-`/tripwire:uninstall` asks first, then deletes the `tripwire-poller` routine and the `tripwire-…` Keychain items, and moves `~/.claude/tripwires` and the routine's folder to the Trash. To remove the mod itself afterwards:
-
-```
-/plugin uninstall tripwire
-```
+`/tripwire:uninstall` asks first. Then it deletes the `tripwire-poller` routine and the `tripwire-…` Keychain items, moves `~/.claude/tripwires` and the routine's folder to the Trash, and uninstalls the plugin itself. The `tripwire` marketplace goes too, and the plugin's cached copies in `~/.claude/plugins/cache` move to the Trash. Quit and reopen Claude afterwards.
 
 If the mod is already gone, the same cleanup runs from a shell: `python3 ~/.claude/tripwires/bin/uninstall.py plan` shows what would go, and `apply` does it. Delete the `tripwire-poller` routine in the desktop app first, then use `apply --routine` so its leftover folder goes too.
 

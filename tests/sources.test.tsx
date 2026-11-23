@@ -317,7 +317,7 @@ const EMPTY_TASKS = 'No scheduled tasks found. Use create_scheduled_task to crea
 // The uninstall script's answers, and the routine tools it reaches for.
 // `tasks` is what list_scheduled_tasks returns; null leaves the routine tools
 // out of the session.
-function uninstallHost(on: On, choice: string, tasks: unknown = [{ taskId: 'tripwire-poller' }]) {
+function uninstallHost(on: On, choice: string, tasks: unknown = [{ taskId: 'tripwire-poller' }], env: Record<string, string> = {}) {
   const plan = { keychain: [{ service: 'tripwire-circleci-token', account: 'tester' }], kept: ['pushover-user-key'], folder: DIR, routine: ROUTINE_FOLDER, errors: [] }
   const host = fakeHost(on, { [INVENTORY]: JSON.stringify({ version: 1, tripwires: [] }), [SOURCES]: JSON.stringify(added('circleci')) }, argv =>
     argv[2]?.endsWith('/uninstall.py')
@@ -327,6 +327,7 @@ function uninstallHost(on: On, choice: string, tasks: unknown = [{ taskId: 'trip
           ),
         }
       : undefined,
+    env,
   )
   if (tasks !== null) host.tools.push('mcp__scheduled-tasks__list_scheduled_tasks', 'mcp__scheduled-tasks__delete_scheduled_task')
   const asked: string[] = []
@@ -363,7 +364,7 @@ test('uninstall removes the routine, Keychain items and folder once confirmed', 
   expect(host.deleted).toEqual(['tripwire-poller'])
   expect(host.ran.filter(r => r.argv[2]?.endsWith('/uninstall.py')).map(r => r.argv.slice(3))).toEqual([['plan'], ['apply', '--routine']])
   expect(String(ran.result)).toMatch(
-    /Deleted the tripwire-poller routine\. Moved the routine's folder.*Trash.*tripwire-circleci-token.*Trash.*Kept: pushover-user-key.*still installed/,
+    /Deleted the tripwire-poller routine\. Moved the routine's folder.*Trash.*tripwire-circleci-token.*Trash.*Kept: pushover-user-key.*loaded from a folder/,
   )
 })
 
@@ -574,4 +575,20 @@ test("update reports the failing step and doesn't go on", async ($, on) => {
 
   expect(host.claudeRuns()).toEqual(['plugin marketplace update tripwire'])
   expect(ran.deny).toMatch(/claude plugin marketplace update tripwire` failed: network down/)
+})
+
+test('uninstall also removes the plugin, its own marketplace and its cached copies', async ($, on) => {
+  const host = uninstallHost(on, 'Uninstall', [{ taskId: 'tripwire-poller' }], { CLAUDE_CODE_EXECPATH: CLAUDE })
+  host.disk.set(CLAUDE, '')
+  const root = /loaded from a folder \(([^)]+)\)/.exec(String((await $.tool.call(UPDATE)).result))![1]!
+  host.disk.set(KNOWN, JSON.stringify({ tripwire: { source: { source: 'github', repo: 'RoseAndres/tripwire' }, installLocation: root } }))
+  host.disk.set(`${root}/.claude-plugin/marketplace.json`, JSON.stringify({ name: 'tripwire', plugins: [{ name: 'tripwire', source: './' }] }))
+  host.disk.set('/home/test/.claude/plugins/cache/tripwire/tripwire/0.3.0/.claude-plugin/plugin.json', '{}')
+
+  const ran = await $.tool.call({ tool: 'mcp__tripwire__uninstall' } as never)
+
+  expect(host.asked[0]).toMatch(/uninstalls the tripwire plugin and its tripwire marketplace and moves its cached copies to the Trash/)
+  expect(host.ran.filter(r => r.argv[0] === CLAUDE).map(r => r.argv.slice(1).join(' '))).toEqual(['plugin uninstall tripwire@tripwire', 'plugin marketplace remove tripwire'])
+  expect(host.ran.find(r => r.argv[0] === '/usr/bin/trash')?.argv[1]).toBe('/home/test/.claude/plugins/cache/tripwire/tripwire')
+  expect(String(ran.result)).toMatch(/Uninstalled the tripwire plugin\. Removed the tripwire marketplace\. Moved its cached copies.*Nothing of tripwire is left/)
 })

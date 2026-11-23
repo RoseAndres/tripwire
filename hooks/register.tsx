@@ -25,6 +25,8 @@ import {
   mutateSources,
   parseTaskList,
   readiness,
+  planPluginRemoval,
+  removePlugin,
   removeRoutine,
   runUninstall,
   sourceDir,
@@ -441,7 +443,7 @@ export const register: Register = on => {
     await $.tool.register({
       name: 'uninstall',
       description:
-        "Uninstalls tripwire. It first asks the user to confirm in a dialog of its own, then deletes the tripwire-poller routine and the tripwire-* Keychain items and moves ~/.claude/tripwires (tripwires, source guides, settings) to the Trash. The mod itself stays installed. Used by the tripwire:uninstall skill; call it only when the user asked to uninstall.",
+        "Uninstalls tripwire completely. It first asks the user to confirm in a dialog of its own, then deletes the tripwire-poller routine and the tripwire-* Keychain items, moves ~/.claude/tripwires (tripwires, source guides, settings) to the Trash, and uninstalls the plugin itself, with its cached copies and, when it holds nothing else, its marketplace. Used by the tripwire:uninstall skill; call it only when the user asked to uninstall.",
       inputSchema: { type: 'object', properties: {} },
     })
     await $.tool.register({
@@ -762,11 +764,15 @@ export const register: Register = on => {
     }
     const count = (await read($, inventory)).tripwires.length
     const items = plan.keychain.map(i => i.service)
+    const plugin = await planPluginRemoval($).catch(() => undefined)
     const question = [
       `This deletes the tripwire-poller routine${plan.routine ? ' and moves its folder to the Trash' : ''}`,
       items.length > 0 ? ` and ${items.length} Keychain item${items.length === 1 ? '' : 's'} (${items.join(', ')}), which can't be undone,` : '',
       plan.folder ? ` and moves ${plan.folder} (${count} tripwire${count === 1 ? '' : 's'}, source guides and settings) to the Trash.` : '.',
       plan.kept.length > 0 ? ` Kept, since tripwire didn't create them: ${plan.kept.join(', ')}.` : '',
+      plugin?.state === 'marketplace'
+        ? ` Last, it uninstalls the tripwire plugin${plugin.removeMarketplace ? ` and its ${plugin.marketplace} marketplace` : ''} and moves its cached copies to the Trash.`
+        : '',
       ' Uninstall tripwire?',
     ].join('')
     let answer: string
@@ -786,6 +792,8 @@ export const register: Register = on => {
     }
     await update($, inventory, () => EMPTY)
     await update($, sourcesAtom, () => EMPTY_SOURCES)
+    // The plugin goes last: once it's uninstalled, this mod unloads.
+    const pluginGone = plugin?.state === 'marketplace' ? await removePlugin($, plugin) : undefined
     const removed = done.removed?.keychain ?? []
     return {
       result: [
@@ -795,8 +803,13 @@ export const register: Register = on => {
         removed.length > 0 ? `Deleted Keychain items: ${removed.join(', ')}.` : 'No tripwire Keychain items to delete.',
         done.removed?.folder ? `Moved ${done.folder} to the Trash.` : plan.folder ? '' : 'There was no ~/.claude/tripwires folder.',
         done.kept.length > 0 ? `Kept: ${done.kept.join(', ')}.` : '',
-        done.errors.length > 0 ? `Problems: ${done.errors.join('; ')}.` : '',
-        'The tripwire mod itself is still installed.',
+        ...(pluginGone?.done ?? []),
+        [...done.errors, ...(pluginGone?.errors ?? [])].length > 0 ? `Problems: ${[...done.errors, ...(pluginGone?.errors ?? [])].join('; ')}.` : '',
+        plugin?.state === 'folder'
+          ? `The mod itself is loaded from a folder (${plugin.root}), so it's still there; take that folder out of CLAUDE_CODE_PLUGIN_DIRS or --plugin-dir to remove it.`
+          : pluginGone && pluginGone.errors.length === 0
+            ? 'Nothing of tripwire is left. Quit and reopen Claude to finish unloading it.'
+            : '',
       ]
         .filter(Boolean)
         .join(' '),

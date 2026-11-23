@@ -655,3 +655,53 @@ export async function runUpdate($: EngineInterface, origin: Extract<Origin, { st
   const to = Array.isArray(entries) ? asRecord(entries[0]).version : undefined
   return { ok: true, text: '', from, to: typeof to === 'string' ? to : undefined }
 }
+
+// Removing the plugin itself, the last step of uninstalling. Goes through
+// Claude Code's own commands, then moves any cached copies Claude Code kept
+// (~/.claude/plugins/cache/<marketplace>/<plugin>/<version>) to the Trash.
+// The marketplace goes too when it holds nothing but tripwire.
+export type PluginRemoval =
+  | { state: 'folder'; root: string }
+  | { state: 'marketplace'; marketplace: string; removeMarketplace: boolean; cacheDir: string; claude?: string }
+
+export async function planPluginRemoval($: EngineInterface): Promise<PluginRemoval> {
+  const origin = await installedFrom($)
+  if (origin.state === 'folder') return { state: 'folder', root: $.plugin.root }
+  const home = await $.env.get('HOME')
+  const known = asRecord(await readJson($, `${home}/.claude/plugins/known_marketplaces.json`))
+  const at = asRecord(known[origin.marketplace]).installLocation
+  const listed = typeof at === 'string' ? asRecord(await readJson($, `${at}/.claude-plugin/marketplace.json`)).plugins : undefined
+  const names = Array.isArray(listed) ? listed.map(p => asRecord(p).name) : []
+  return {
+    state: 'marketplace',
+    marketplace: origin.marketplace,
+    removeMarketplace: names.length === 1 && names[0] === $.plugin.name,
+    cacheDir: `${home}/.claude/plugins/cache/${origin.marketplace}/${$.plugin.name}`,
+    claude: await claudeProgram($),
+  }
+}
+
+export async function removePlugin($: EngineInterface, plan: Extract<PluginRemoval, { state: 'marketplace' }>) {
+  const done: string[] = []
+  const errors: string[] = []
+  if (!plan.claude) {
+    errors.push("couldn't find the Claude Code program to uninstall the plugin with")
+  } else {
+    const steps = [['plugin', 'uninstall', `${$.plugin.name}@${plan.marketplace}`], ...(plan.removeMarketplace ? [['plugin', 'marketplace', 'remove', plan.marketplace]] : [])]
+    for (const args of steps) {
+      const ran = await $.process.run([plan.claude, ...args], { timeoutMs: 120_000 }).catch(err => ({ exitCode: -1, stdout: '', stderr: String(err) }))
+      if (ran.exitCode === 0) {
+        done.push(args[1] === 'uninstall' ? `Uninstalled the ${$.plugin.name} plugin.` : `Removed the ${plan.marketplace} marketplace.`)
+      } else {
+        const said = `${ran.stderr || ran.stdout}`.trim().split('\n').slice(-2).join(' ').slice(0, 200)
+        errors.push(`\`claude ${args.join(' ')}\` failed${said ? `: ${said}` : ''}`)
+      }
+    }
+  }
+  if (await $.fs.exists(plan.cacheDir)) {
+    const moved = await $.process.run(['/usr/bin/trash', plan.cacheDir]).catch(() => undefined)
+    if (moved?.exitCode === 0) done.push(`Moved its cached copies (${plan.cacheDir}) to the Trash.`)
+    else errors.push(`couldn't move ${plan.cacheDir} to the Trash`)
+  }
+  return { done, errors }
+}
