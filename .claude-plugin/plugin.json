@@ -1,6 +1,6 @@
 {
   "name": "tripwire",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Reminders that fire on activity in Slack, Linear, Jira, GitHub, CircleCI, Datadog or any source you teach it, instead of at a time. Set up with /tripwire:setup, arm with /tripwire:arm, manage them with /tripwire:inventory.",
   "types": "./types/index.d.ts",
   "author": {
